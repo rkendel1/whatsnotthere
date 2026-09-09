@@ -18,6 +18,16 @@ pub struct ObservationEnvelope {
     pub headers: Map<String, Value>,
     #[serde(default)]
     pub body: Option<String>,
+    #[serde(default, rename = "requestHeaders")]
+    pub request_headers: Map<String, Value>,
+    #[serde(default, rename = "requestBody")]
+    pub request_body: Option<String>,
+    #[serde(default, rename = "pageUrl")]
+    pub page_url: Option<String>,
+    #[serde(default)]
+    pub interaction: Option<Value>,
+    #[serde(default)]
+    pub credentials: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -1,7 +1,10 @@
 pub mod artifact;
 pub mod capability;
+pub mod catalog;
 pub mod confidence;
+pub mod dataset;
 pub mod dom;
+pub mod ghost;
 pub mod inference;
 pub mod integration;
 pub mod network;

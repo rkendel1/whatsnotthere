@@ -1,13 +1,15 @@
 use crate::artifact::build_deterministic_artifact;
 use crate::capability::infer_capabilities;
+use crate::catalog::build_api_field_guide;
 use crate::confidence::confidence_score;
+use crate::dataset::reconstruct_datasets;
 use crate::dom::extract_invisible_content;
+use crate::ghost::analyze_ghost_data;
 use crate::integration::detect_integrations;
 use crate::network::{endpoint_from_observation, Endpoint};
 use crate::observation::{AnalyzeRequest, ObservationEnvelope};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use url::Url;
 
 const FLAG_PATTERNS: [&str; 6] = [
     "feature",
@@ -70,246 +72,68 @@ fn infer_endpoints(observations: &[&ObservationEnvelope]) -> Vec<Endpoint> {
     dedup.into_values().collect()
 }
 
-fn parse_body(body: Option<&String>) -> Option<Value> {
-    serde_json::from_str::<Value>(body?.as_str()).ok()
-}
+fn annotate_rendered_fields(extraction: &mut Value, snapshot: &Value) {
+    let rendered = snapshot
+        .get("renderedText")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_lowercase();
+    let Some(datasets) = extraction.get_mut("datasets").and_then(Value::as_array_mut) else {
+        return;
+    };
 
-fn find_collection(body: &Value) -> Option<(String, Vec<Value>)> {
-    if let Some(items) = body.as_array() {
-        let objects: Vec<Value> = items
-            .iter()
-            .filter(|item| item.is_object())
+    for dataset in datasets {
+        let fields = dataset
+            .pointer("/provenance/fields")
+            .and_then(Value::as_object)
             .cloned()
-            .collect();
-        if !objects.is_empty() {
-            return Some(("items".to_string(), objects));
-        }
-    }
-
-    let obj = body.as_object()?;
-    for (key, value) in obj {
-        if let Some(items) = value.as_array() {
-            let objects: Vec<Value> = items
-                .iter()
-                .filter(|item| item.is_object())
-                .cloned()
-                .collect();
-            if !objects.is_empty() {
-                return Some((key.clone(), objects));
+            .unwrap_or_default();
+        let mut visible = Vec::new();
+        let mut machine_only = Vec::new();
+        let mut matches = serde_json::Map::new();
+        for (field, provenance) in fields {
+            let lower_field = field.to_lowercase();
+            let identity_like = lower_field == "id"
+                || lower_field.ends_with(".id")
+                || lower_field.ends_with("_id")
+                || lower_field.contains("tracking");
+            let matched_values = provenance
+                .get("evidence")
+                .and_then(Value::as_array)
+                .map(|evidence| {
+                    evidence
+                        .iter()
+                        .filter_map(|item| item.get("value"))
+                        .filter_map(|value| match value {
+                            Value::String(text) if text.trim().len() >= 3 => {
+                                Some(text.trim().to_lowercase())
+                            }
+                            Value::Number(number) if !identity_like => Some(number.to_string()),
+                            _ => None,
+                        })
+                        .filter(|value| rendered.contains(value))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if !identity_like && !matched_values.is_empty() {
+                visible.push(Value::String(field.clone()));
+                matches.insert(
+                    field,
+                    json!({"method": "rendered-value-match", "values": matched_values}),
+                );
+            } else {
+                machine_only.push(Value::String(field));
             }
         }
-    }
-
-    None
-}
-
-fn infer_identity(items: &[Value]) -> Value {
-    let Some(first) = items.first().and_then(Value::as_object) else {
-        return json!({"field": null, "confidence": 0.0});
-    };
-
-    for key in first.keys() {
-        let lower = key.to_lowercase();
-        if lower == "id"
-            || lower.ends_with("_id")
-            || lower.contains("uuid")
-            || lower.contains("slug")
-        {
-            let present = items
-                .iter()
-                .filter(|item| item.get(key).map(|v| !v.is_null()).unwrap_or(false))
-                .count();
-            let confidence = (0.6 + (present as f64 / items.len() as f64) * 0.4f64).min(1.0);
-            return json!({"field": key, "confidence": ((confidence * 100.0).round() / 100.0)});
-        }
-    }
-
-    json!({"field": null, "confidence": 0.0})
-}
-
-fn infer_relationships(item_schema: &Value) -> Vec<Value> {
-    let mut relationships = Vec::new();
-    let Some(properties) = item_schema.get("properties").and_then(Value::as_object) else {
-        return relationships;
-    };
-
-    for (name, schema) in properties {
-        if schema.get("type").and_then(Value::as_str) == Some("object") {
-            if let Some(inner) = schema.get("properties").and_then(Value::as_object) {
-                if let Some(identity) = inner.keys().find(|key| {
-                    let lower = key.to_lowercase();
-                    lower == "id"
-                        || lower.ends_with("_id")
-                        || lower.contains("uuid")
-                        || lower.contains("slug")
-                }) {
-                    relationships.push(json!({
-                        "name": name,
-                        "kind": "object",
-                        "identityField": identity,
-                        "confidence": 0.88
-                    }));
-                }
-            }
-        }
-    }
-
-    relationships
-}
-
-fn infer_pagination(observation: &ObservationEnvelope, body: &Value) -> Value {
-    let parsed = observation
-        .url
-        .as_deref()
-        .and_then(|url| Url::parse(url).ok());
-    let query = parsed.as_ref().map(Url::query_pairs);
-
-    let has_cursor_query = query
-        .map(|pairs| {
-            pairs.into_owned().any(|(key, _)| {
-                matches!(
-                    key.as_str(),
-                    "cursor" | "after" | "nextCursor" | "pageToken"
-                )
-            })
-        })
-        .unwrap_or(false);
-
-    let has_cursor_response = body
-        .as_object()
-        .map(|obj| {
-            obj.contains_key("nextCursor")
-                || obj.contains_key("cursor")
-                || obj.contains_key("nextPageToken")
-                || obj.contains_key("endCursor")
-        })
-        .unwrap_or(false);
-
-    if has_cursor_query || has_cursor_response {
-        let cursor_field = body
-            .as_object()
-            .and_then(|obj| {
-                ["nextCursor", "cursor", "nextPageToken", "endCursor"]
-                    .iter()
-                    .find(|key| obj.contains_key(**key))
-                    .copied()
-            })
-            .or_else(|| {
-                if has_cursor_query {
-                    Some("cursor")
-                } else {
-                    None
-                }
-            });
-        return json!({
-            "detected": true,
-            "type": "cursor",
-            "cursorField": cursor_field,
-            "confidence": if has_cursor_query && has_cursor_response { 0.97 } else { 0.86 }
+        dataset["presentation"] = json!({
+            "visibleFields": visible,
+            "machineOnlyFields": machine_only,
+            "matches": matches,
+            "method": "observed values matched against rendered page text"
         });
     }
-
-    json!({"detected": false, "type": null, "cursorField": null, "confidence": 0.0})
 }
 
-fn infer_collection_name(name: &str, url: Option<&str>) -> String {
-    if name != "items" {
-        return name.to_string();
-    }
-    let Some(parsed) = url.and_then(|raw| Url::parse(raw).ok()) else {
-        return "items".to_string();
-    };
-    parsed
-        .path_segments()
-        .and_then(|segments| {
-            segments
-                .filter(|segment| !segment.is_empty())
-                .last()
-                .map(str::to_string)
-        })
-        .unwrap_or_else(|| "items".to_string())
-}
-
-fn reconstruct_datasets(observations: &[&ObservationEnvelope]) -> Value {
-    let mut dedup: BTreeMap<String, Value> = BTreeMap::new();
-
-    for observation in observations {
-        let Some(parsed_body) = parse_body(observation.body.as_ref()) else {
-            continue;
-        };
-        let Some((collection_key, items)) = find_collection(&parsed_body) else {
-            continue;
-        };
-        if items.is_empty() {
-            continue;
-        }
-
-        let dataset_name = infer_collection_name(&collection_key, observation.url.as_deref());
-        let normalized_url =
-            crate::network::normalize_endpoint(observation.url.as_deref().unwrap_or_default());
-        let method = observation
-            .method
-            .clone()
-            .unwrap_or_else(|| "GET".to_string());
-        let dedup_key = format!("{method}:{normalized_url}:{dataset_name}");
-        let schema = crate::schema::infer_schema(items.first().unwrap_or(&Value::Null), 0);
-        let identity = infer_identity(&items);
-        let pagination = infer_pagination(observation, &parsed_body);
-        let relationships = infer_relationships(&schema);
-        let fields = schema
-            .get("properties")
-            .and_then(Value::as_object)
-            .map(|props| props.len())
-            .unwrap_or(0);
-
-        let entry = dedup.entry(dedup_key).or_insert_with(|| {
-                json!({
-                    "name": dataset_name,
-                    "source": {"method": method, "url": normalized_url},
-                    "observedItems": 0,
-                    "fields": fields,
-                    "schema": schema,
-                    "identity": identity,
-                    "pagination": pagination,
-                    "relationships": relationships,
-                    "preview": [],
-                    "confidence": {
-                        "collection": 0.99,
-                        "pagination": pagination.get("confidence").cloned().unwrap_or_else(|| json!(0.0)),
-                        "identity": identity.get("confidence").cloned().unwrap_or_else(|| json!(0.0)),
-                        "relationships": if relationships.is_empty() { 0.0 } else { 0.88 }
-                    }
-                })
-            });
-
-        let current_count = entry
-            .get("observedItems")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        entry["observedItems"] = json!(current_count + items.len() as u64);
-
-        if let Some(preview) = entry.get_mut("preview").and_then(Value::as_array_mut) {
-            for item in items.iter().take(5usize.saturating_sub(preview.len())) {
-                preview.push(item.clone());
-            }
-        }
-    }
-
-    let datasets: Vec<Value> = dedup.into_values().collect();
-    let total: usize = datasets
-        .iter()
-        .filter_map(|dataset| dataset.get("observedItems").and_then(Value::as_u64))
-        .map(|count| count as usize)
-        .sum();
-
-    json!({
-        "datasets": datasets,
-        "summary": {
-            "collections": datasets.len(),
-            "totalObservedItems": total
-        }
-    })
-}
 pub fn analyze_request(request: AnalyzeRequest) -> Value {
     let network = network_observations(&request.observations);
     let endpoints = infer_endpoints(&network);
@@ -345,6 +169,27 @@ pub fn analyze_request(request: AnalyzeRequest) -> Value {
         hidden_contracts.len(),
     );
 
+    let mut structured_extraction = reconstruct_datasets(&network);
+    annotate_rendered_fields(&mut structured_extraction, &request.snapshot);
+    let page_projection = structured_extraction
+        .get("datasets")
+        .and_then(Value::as_array)
+        .and_then(|datasets| datasets.iter().max_by_key(|dataset| {
+            dataset.get("observedItems").and_then(Value::as_u64).unwrap_or(0)
+        }))
+        .map(|dataset| json!({
+            "kind": "collection",
+            "datasetId": dataset.get("id"),
+            "name": dataset.get("name"),
+            "entities": dataset.get("observedItems"),
+            "observedAttributes": dataset.get("fields"),
+            "relationships": dataset.get("relationships").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
+            "description": format!(
+                "This page is a projection of a {} collection.",
+                dataset.get("name").and_then(Value::as_str).unwrap_or("structured")
+            )
+        }));
+
     let mut report = json!({
         "tabId": request.tab_id,
         "discoveredAt": request.discovered_at,
@@ -359,8 +204,29 @@ pub fn analyze_request(request: AnalyzeRequest) -> Value {
             .unwrap_or_else(|| json!([])),
         "integrations": detect_integrations(&network_urls),
         "confidence": confidence,
-        "structuredExtraction": reconstruct_datasets(&network),
+        "structuredExtraction": structured_extraction,
+        "pageProjection": page_projection,
+        "apiFieldGuide": build_api_field_guide(&network),
     });
+
+    let endpoint_snapshot = report
+        .get("endpoints")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let flag_snapshot = report
+        .get("featureFlags")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    report["ghostData"] = analyze_ghost_data(
+        &structured_extraction,
+        &network,
+        &endpoint_snapshot,
+        &flag_snapshot,
+        report.get("integrations").unwrap_or(&Value::Null),
+        &request.snapshot,
+    );
 
     let capability_model = infer_capabilities(&report);
     report["capabilityModel"] = capability_model;
@@ -430,7 +296,7 @@ mod tests {
                 "headers": {"content-type": "application/json"},
                 "body": "{\"jobs\":[{\"id\":\"job-1\",\"title\":\"Senior Engineer\",\"company\":{\"id\":\"co-1\",\"name\":\"Acme\"},\"location\":\"Boston\"}],\"nextCursor\":\"def\"}"
             }],
-            "snapshot": {}
+            "snapshot": {"renderedText": "Senior Engineer at Acme — Boston"}
         }))
         .expect("test observation payload should deserialize");
 
@@ -446,5 +312,13 @@ mod tests {
         assert_eq!(dataset["pagination"]["cursorField"], "nextCursor");
         assert_eq!(dataset["relationships"][0]["name"], "company");
         assert_eq!(dataset["fields"], 4);
+        assert!(dataset["presentation"]["visibleFields"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("title")));
+        assert!(dataset["presentation"]["machineOnlyFields"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("id")));
     }
 }

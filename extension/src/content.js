@@ -7,6 +7,8 @@
   script.remove();
 })();
 
+chrome.runtime.sendMessage({ kind: 'page_started', url: window.location.href });
+
 window.addEventListener('message', (event) => {
   if (event.source !== window) return;
   if (event.data?.source !== 'website-xray') return;
@@ -84,15 +86,42 @@ function collectSnapshot() {
     sessionStorageData,
     globalCandidates,
     invisibleContent: { hiddenElements, hiddenInputs, metadata, accessibilityOnly },
-    behavioralScripts
+    behavioralScripts,
+    renderedText: (document.body?.innerText || '').slice(0, 500_000)
   };
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.kind !== 'collect_snapshot') return false;
-  const snapshot = collectSnapshot();
-  chrome.runtime.sendMessage({ kind: 'dom_snapshot', snapshot }, () => {
-    sendResponse({ ok: true });
-  });
-  return true;
+  if (message?.kind === 'collect_snapshot') {
+    const snapshot = collectSnapshot();
+    chrome.runtime.sendMessage({ kind: 'dom_snapshot', snapshot }, () => {
+      sendResponse({ ok: true });
+    });
+    return true;
+  }
+
+  if (message?.kind === 'replay_page') {
+    const requestId = crypto.randomUUID();
+    const timeout = setTimeout(() => {
+      window.removeEventListener('message', receiveResult);
+      sendResponse({ ok: false, error: 'Replay request timed out.' });
+    }, 30_000);
+    function receiveResult(event) {
+      if (event.source !== window || event.data?.source !== 'website-xray-page') return;
+      if (event.data?.kind !== 'replay-result' || event.data.requestId !== requestId) return;
+      clearTimeout(timeout);
+      window.removeEventListener('message', receiveResult);
+      sendResponse(event.data.result);
+    }
+    window.addEventListener('message', receiveResult);
+    window.postMessage({
+      source: 'website-xray-content',
+      kind: 'replay-request',
+      requestId,
+      request: message.request,
+    }, '*');
+    return true;
+  }
+
+  return false;
 });
