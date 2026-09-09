@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Website X-Ray",
+  "version": "0.1.0",
+  "description": "Reveal undocumented APIs, hidden contracts, and invisible layers behind websites.",
+  "permissions": ["storage", "tabs", "activeTab"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Website X-Ray",
+    "default_popup": "src/ui/popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["src/injected/networkProbe.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
