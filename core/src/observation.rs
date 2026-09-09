@@ -21,6 +21,7 @@ pub struct ObservationEnvelope {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct AnalyzeRequest {
     pub tab_id: i64,
     pub discovered_at: String,

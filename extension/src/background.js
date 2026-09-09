@@ -28,10 +28,10 @@ function toObservationEnvelope(event) {
   };
 }
 
-function aggregate(tabId) {
+async function aggregate(tabId) {
   const state = getTabState(tabId);
 
-  return analyzeWithCore({
+  return await analyzeWithCore({
     tabId,
     discoveredAt: new Date().toISOString(),
     observations: state.observations,
@@ -72,7 +72,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
-      sendResponse({ ok: true, report: aggregate(tabId) });
+      aggregate(tabId)
+        .then((report) => sendResponse({ ok: true, report }))
+        .catch((error) => sendResponse({ ok: false, error: error.message }));
     });
 
     return true;

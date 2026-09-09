@@ -5,7 +5,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test extension/tests/**/*.test.js"
+    "build:wasm": "wasm-pack build wasm --target web --out-dir ../extension/src/wasm --out-name xray_wasm --release",
+    "build": "npm run build:wasm",
+    "test:js": "node --test extension/tests/**/*.test.js",
+    "test:rust": "cargo test --workspace",
+    "test": "npm run test:rust && npm run test:js"
   },
   "keywords": [
     "browser-extension",

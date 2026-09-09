@@ -14,11 +14,15 @@ Website X-Ray MVP browser extension for discovering hidden layers of websites:
    ```bash
    npm install
    ```
-2. Run focused tests:
+2. Build the Rust analyzer into the loadable extension directory:
+   ```bash
+   npm run build
+   ```
+3. Run focused tests:
    ```bash
    npm test
    ```
-3. Load extension in Chromium:
+4. Load extension in Chromium:
    - Open `chrome://extensions`
    - Enable **Developer mode**
    - Click **Load unpacked**
@@ -48,4 +52,4 @@ A Rust engine boundary is scaffolded for deterministic analysis portability:
 - `core/` contains `xray-core` modules for observation normalization, inference, integrations, confidence, and artifact generation
 - `wasm/` exposes `analyze_observations(input_json)` so the same core can be consumed from WASM
 
-This keeps JS focused on capture/UI while allowing the analyzer to move to Rust without changing the observation contract.
+The loaded extension invokes the Rust analyzer through `extension/src/wasm/xray_wasm.js`; JavaScript only captures browser observations, initializes WASM, and renders the returned report. The extension itself serves the generated WASM asset from its `chrome-extension://` origin, so no separate HTTP development server is required.

@@ -411,3 +411,40 @@ pub fn analyze_request(request: AnalyzeRequest) -> Value {
 
     report
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::observation::AnalyzeRequest;
+
+    #[test]
+    fn reconstructs_structured_collections_with_pagination_and_relationships() {
+        let request: AnalyzeRequest = serde_json::from_value(json!({
+            "tabId": 11,
+            "discoveredAt": "2026-01-01T00:00:00.000Z",
+            "observations": [{
+                "kind": "network.response",
+                "method": "GET",
+                "url": "https://jobs.example.com/api/jobs?cursor=abc",
+                "status": 200,
+                "headers": {"content-type": "application/json"},
+                "body": "{\"jobs\":[{\"id\":\"job-1\",\"title\":\"Senior Engineer\",\"company\":{\"id\":\"co-1\",\"name\":\"Acme\"},\"location\":\"Boston\"}],\"nextCursor\":\"def\"}"
+            }],
+            "snapshot": {}
+        }))
+        .expect("test observation payload should deserialize");
+
+        let report = analyze_request(request);
+        let extraction = &report["structuredExtraction"];
+        let dataset = &extraction["datasets"][0];
+
+        assert_eq!(extraction["summary"]["collections"], 1);
+        assert_eq!(extraction["summary"]["totalObservedItems"], 1);
+        assert_eq!(dataset["name"], "jobs");
+        assert_eq!(dataset["identity"]["field"], "id");
+        assert_eq!(dataset["pagination"]["type"], "cursor");
+        assert_eq!(dataset["pagination"]["cursorField"], "nextCursor");
+        assert_eq!(dataset["relationships"][0]["name"], "company");
+        assert_eq!(dataset["fields"], 4);
+    }
+}
