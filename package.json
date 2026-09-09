@@ -1,0 +1,16 @@
+{
+  "name": "whatsnotthere",
+  "version": "1.0.0",
+  "description": "Website X-Ray MVP browser extension",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test extension/tests/**/*.test.js"
+  },
+  "keywords": [
+    "browser-extension",
+    "xray",
+    "api-discovery"
+  ],
+  "license": "MIT"
+}
