@@ -33,6 +33,7 @@ The extension popup produces a report containing:
 - `invisibleContent`: hidden fields/elements and metadata
 - `behavioralScripts`: script references with behavior-tracking signatures
 - `integrations`: detected third-party services
+- `structuredExtraction`: reconstructed dataset collections with schema, identities, pagination, and relationships
 - `deterministicArtifact`: canonical representation + stable artifact hash
 - `connectors`: templates for Slack/Notion/Sheets integration
 - `localReplay.featureFlags`: localStorage commands for replaying hidden flags

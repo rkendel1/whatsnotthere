@@ -91,3 +91,43 @@ test('analyzeObservationSession uses observation envelopes and raw snapshot inpu
   assert.equal(report.featureFlags.length, 2);
   assert.equal(report.confidence.score, 0.2);
 });
+
+test('analyzeObservationSession reconstructs structured collections with pagination and relationships', () => {
+  const report = analyzeObservationSession({
+    tabId: 11,
+    discoveredAt: '2026-01-01T00:00:00.000Z',
+    observations: [
+      {
+        kind: 'network.response',
+        method: 'GET',
+        url: 'https://jobs.example.com/api/jobs?cursor=abc',
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          jobs: [
+            {
+              id: 'job-1',
+              title: 'Senior Engineer',
+              company: { id: 'co-1', name: 'Acme' },
+              location: 'Boston'
+            }
+          ],
+          nextCursor: 'def'
+        })
+      }
+    ],
+    snapshot: {}
+  });
+
+  const extraction = report.structuredExtraction;
+  assert.equal(extraction.summary.collections, 1);
+  assert.equal(extraction.summary.totalObservedItems, 1);
+
+  const [dataset] = extraction.datasets;
+  assert.equal(dataset.name, 'jobs');
+  assert.equal(dataset.identity.field, 'id');
+  assert.equal(dataset.pagination.type, 'cursor');
+  assert.equal(dataset.pagination.cursorField, 'nextCursor');
+  assert.equal(dataset.relationships[0].name, 'company');
+  assert.equal(dataset.fields, 4);
+});

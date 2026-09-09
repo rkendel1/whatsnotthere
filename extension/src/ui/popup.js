@@ -10,7 +10,7 @@ async function currentTabId() {
 
 button.addEventListener('click', async () => {
   error.textContent = '';
-  output.textContent = 'Scanning hidden layers...';
+  output.textContent = 'Reconstructing dataset from observed traffic...';
 
   try {
     const tabId = await currentTabId();
