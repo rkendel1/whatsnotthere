@@ -1,5 +1,3 @@
-import { detectFeatureFlags, extractInvisibleContent } from './shared/analyzer.js';
-
 (function installProbe() {
   const src = chrome.runtime.getURL('src/injected/networkProbe.js');
   const script = document.createElement('script');
@@ -81,15 +79,11 @@ function collectSnapshot() {
       return acc;
     }, {});
 
-  const featureFlags = detectFeatureFlags({
-    localStorage: localStorageData,
-    sessionStorage: sessionStorageData,
-    globals: globalCandidates
-  });
-
   return {
-    featureFlags,
-    invisibleContent: extractInvisibleContent({ hiddenElements, hiddenInputs, metadata, accessibilityOnly }),
+    localStorageData,
+    sessionStorageData,
+    globalCandidates,
+    invisibleContent: { hiddenElements, hiddenInputs, metadata, accessibilityOnly },
     behavioralScripts
   };
 }
