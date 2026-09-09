@@ -57,7 +57,8 @@ test('buildDeterministicArtifact yields stable artifact id', () => {
 
   const first = buildDeterministicArtifact(report);
   const second = buildDeterministicArtifact({ ...report, discoveredAt: 'time-b' });
+  const canonicalReport = JSON.parse(first.canonical);
 
   assert.equal(first.artifactId, second.artifactId);
-  assert.ok(first.canonical.includes('https://a.example.com'));
+  assert.equal(canonicalReport.endpoints[0].url, 'https://a.example.com');
 });

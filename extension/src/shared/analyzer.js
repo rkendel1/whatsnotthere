@@ -124,10 +124,10 @@ export function hashString(input) {
 }
 
 export function buildDeterministicArtifact(report) {
+  const { discoveredAt: _ignoredDiscoveredAt, ...reportWithoutTimestamp } = report;
   const normalized = {
-    ...report,
-    endpoints: [...report.endpoints].sort((a, b) => a.url.localeCompare(b.url)),
-    discoveredAt: undefined
+    ...reportWithoutTimestamp,
+    endpoints: [...report.endpoints].sort((a, b) => a.url.localeCompare(b.url))
   };
   const canonical = stableStringify(normalized);
   return {
