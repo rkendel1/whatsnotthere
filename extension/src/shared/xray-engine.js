@@ -11,6 +11,12 @@ const THIRD_PARTY_SIGNATURES = {
   mixpanel: [/mixpanel\.com/i]
 };
 
+const IDENTITY_PATTERNS = [/^id$/i, /_id$/i, /Id$/, /uuid/i, /slug/i];
+const CURSOR_REQUEST_KEYS = ['cursor', 'after', 'nextCursor', 'pageToken'];
+const CURSOR_RESPONSE_KEYS = ['nextCursor', 'cursor', 'nextPageToken', 'endCursor'];
+const PAGE_REQUEST_KEYS = ['page', 'offset', 'start'];
+const PAGINATION_HINT_KEYS = ['hasMore', 'total', 'totalCount', 'pageSize', 'limit'];
+
 export function normalizeEndpoint(url) {
   try {
     const parsed = new URL(url);
@@ -158,6 +164,181 @@ function asEndpoint(observation) {
   };
 }
 
+function parseUrlMaybe(url) {
+  try {
+    return new URL(url);
+  } catch {
+    return null;
+  }
+}
+
+function findArrayCollectionCandidate(parsedBody) {
+  if (Array.isArray(parsedBody)) return { name: 'items', items: parsedBody };
+  if (!parsedBody || typeof parsedBody !== 'object') return null;
+
+  for (const [key, value] of Object.entries(parsedBody)) {
+    if (Array.isArray(value) && value.some((entry) => entry && typeof entry === 'object' && !Array.isArray(entry))) {
+      return { name: key, items: value };
+    }
+  }
+  return null;
+}
+
+function inferIdentityFieldFromItems(items = []) {
+  const objectItems = items.filter((item) => item && typeof item === 'object' && !Array.isArray(item));
+  if (!objectItems.length) return { field: null, confidence: 0 };
+
+  const first = objectItems[0];
+  const keys = Object.keys(first);
+  if (!keys.length) return { field: null, confidence: 0 };
+
+  for (const key of keys) {
+    if (IDENTITY_PATTERNS.some((pattern) => pattern.test(key))) {
+      const nonNullCount = objectItems.filter((item) => item[key] !== undefined && item[key] !== null).length;
+      const confidence = Number((0.6 + (nonNullCount / objectItems.length) * 0.4).toFixed(2));
+      return { field: key, confidence };
+    }
+  }
+
+  return { field: null, confidence: 0 };
+}
+
+function inferRelationshipsFromItemSchema(itemSchema) {
+  if (!itemSchema || itemSchema.type !== 'object') return [];
+
+  const relationships = [];
+  for (const [name, schema] of Object.entries(itemSchema.properties ?? {})) {
+    if (!schema) continue;
+
+    if (schema.type === 'object') {
+      const identityField = Object.keys(schema.properties ?? {}).find((key) =>
+        IDENTITY_PATTERNS.some((pattern) => pattern.test(key))
+      );
+      if (identityField) {
+        relationships.push({ name, kind: 'object', identityField, confidence: 0.88 });
+      }
+      continue;
+    }
+
+    if (schema.type === 'array' && schema.items?.type === 'object') {
+      const identityField = Object.keys(schema.items.properties ?? {}).find((key) =>
+        IDENTITY_PATTERNS.some((pattern) => pattern.test(key))
+      );
+      if (identityField) {
+        relationships.push({ name, kind: 'array', identityField, confidence: 0.82 });
+      }
+    }
+  }
+
+  return relationships;
+}
+
+function inferPagination(observation, parsedBody) {
+  const url = parseUrlMaybe(observation.url);
+  const query = url?.searchParams;
+  const bodyObject = parsedBody && typeof parsedBody === 'object' ? parsedBody : null;
+
+  const cursorRequestKey = CURSOR_REQUEST_KEYS.find((key) => query?.has(key));
+  const cursorResponseKey = CURSOR_RESPONSE_KEYS.find((key) => bodyObject && key in bodyObject);
+  if (cursorRequestKey || cursorResponseKey) {
+    return {
+      detected: true,
+      type: 'cursor',
+      cursorField: cursorResponseKey || cursorRequestKey || null,
+      confidence: cursorRequestKey && cursorResponseKey ? 0.97 : 0.86
+    };
+  }
+
+  const pageRequestKey = PAGE_REQUEST_KEYS.find((key) => query?.has(key));
+  const pageHintKey = PAGINATION_HINT_KEYS.find((key) => bodyObject && key in bodyObject);
+  if (pageRequestKey || pageHintKey) {
+    return {
+      detected: true,
+      type: 'page',
+      cursorField: null,
+      confidence: pageRequestKey && pageHintKey ? 0.9 : 0.78
+    };
+  }
+
+  return { detected: false, type: null, cursorField: null, confidence: 0 };
+}
+
+function inferCollectionName(defaultName, url) {
+  if (defaultName && defaultName !== 'items') return defaultName;
+  const parsed = parseUrlMaybe(url);
+  if (!parsed) return defaultName || 'items';
+  const segment = parsed.pathname.split('/').filter(Boolean).pop();
+  return segment || defaultName || 'items';
+}
+
+function reconstructDatasets(networkObservations) {
+  const datasets = [];
+  const dedup = new Map();
+
+  for (const observation of networkObservations) {
+    const parsedBody = parseBodyMaybe(observation.body ?? observation.responseBody);
+    const collectionCandidate = findArrayCollectionCandidate(parsedBody);
+    if (!collectionCandidate) continue;
+
+    const datasetName = inferCollectionName(collectionCandidate.name, observation.url);
+    const normalizedUrl = normalizeEndpoint(observation.url ?? '');
+    const key = `${observation.method || 'GET'}:${normalizedUrl}:${datasetName}`;
+    const items = collectionCandidate.items.filter((item) => item && typeof item === 'object' && !Array.isArray(item));
+    if (!items.length) continue;
+
+    const itemSchema = inferSchema(items[0]);
+    const identity = inferIdentityFieldFromItems(items);
+    const pagination = inferPagination(observation, parsedBody);
+    const relationships = inferRelationshipsFromItemSchema(itemSchema);
+
+    const existing = dedup.get(key);
+    if (!existing) {
+      dedup.set(key, {
+        name: datasetName,
+        source: { method: observation.method || 'GET', url: normalizedUrl },
+        observedItems: items.length,
+        fields: Object.keys(itemSchema.properties ?? {}).length,
+        schema: itemSchema,
+        identity,
+        pagination,
+        relationships,
+        preview: items.slice(0, 5),
+        confidence: {
+          collection: 0.99,
+          pagination: pagination.confidence,
+          identity: identity.confidence,
+          relationships: relationships.length ? 0.88 : 0
+        }
+      });
+      continue;
+    }
+
+    existing.observedItems += items.length;
+    if (existing.preview.length < 5) {
+      existing.preview = [...existing.preview, ...items.slice(0, 5 - existing.preview.length)];
+    }
+    existing.pagination = existing.pagination.confidence >= pagination.confidence ? existing.pagination : pagination;
+    existing.identity = existing.identity.confidence >= identity.confidence ? existing.identity : identity;
+    if (relationships.length > existing.relationships.length) {
+      existing.relationships = relationships;
+    }
+    existing.confidence.pagination = existing.pagination.confidence;
+    existing.confidence.identity = existing.identity.confidence;
+    existing.confidence.relationships = existing.relationships.length ? 0.88 : 0;
+  }
+
+  datasets.push(...dedup.values());
+  datasets.sort((a, b) => b.observedItems - a.observedItems || a.name.localeCompare(b.name));
+
+  return {
+    datasets,
+    summary: {
+      collections: datasets.length,
+      totalObservedItems: datasets.reduce((sum, dataset) => sum + dataset.observedItems, 0)
+    }
+  };
+}
+
 export function analyzeObservationSession({ tabId, discoveredAt, observations = [], snapshot = {} }) {
   const networkObservations = observations.filter((item) => item?.kind === 'network.response');
   const endpointsMap = new Map();
@@ -196,7 +377,8 @@ export function analyzeObservationSession({ tabId, discoveredAt, observations = 
         featureFlags: featureFlags.length,
         hiddenContracts: endpoints.filter((endpoint) => endpoint.schema).length
       }
-    }
+    },
+    structuredExtraction: reconstructDatasets(networkObservations)
   };
 
   const artifact = buildDeterministicArtifact(report);
