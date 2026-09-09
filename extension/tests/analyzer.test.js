@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  analyzeObservationSession,
   buildDeterministicArtifact,
   detectFeatureFlags,
   detectThirdPartyIntegrations,
@@ -61,4 +62,32 @@ test('buildDeterministicArtifact yields stable artifact id', () => {
 
   assert.equal(first.artifactId, second.artifactId);
   assert.equal(canonicalReport.endpoints[0].url, 'https://a.example.com');
+});
+
+test('analyzeObservationSession uses observation envelopes and raw snapshot inputs', () => {
+  const report = analyzeObservationSession({
+    tabId: 9,
+    discoveredAt: '2026-01-01T00:00:00.000Z',
+    observations: [
+      {
+        kind: 'network.response',
+        method: 'GET',
+        url: 'https://api.example.com/users?limit=10',
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ users: [{ id: 1 }] })
+      }
+    ],
+    snapshot: {
+      localStorageData: { feature_checkout: 'true' },
+      sessionStorageData: {},
+      globalCandidates: { darkLaunchBeta: false },
+      invisibleContent: { hiddenElements: [], hiddenInputs: [], metadata: {}, accessibilityOnly: [] },
+      behavioralScripts: []
+    }
+  });
+
+  assert.equal(report.endpoints[0].url, 'https://api.example.com/users');
+  assert.equal(report.featureFlags.length, 2);
+  assert.equal(report.confidence.score, 0.2);
 });

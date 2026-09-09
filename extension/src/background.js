@@ -1,88 +1,42 @@
-import {
-  buildDeterministicArtifact,
-  detectThirdPartyIntegrations,
-  generateConnectors,
-  inferSchema,
-  normalizeEndpoint
-} from './shared/analyzer.js';
+import { analyzeWithCore } from './wasm-bridge.js';
 
 const stateByTab = new Map();
 
 function getTabState(tabId) {
   if (!stateByTab.has(tabId)) {
     stateByTab.set(tabId, {
-      network: [],
+      observations: [],
       snapshot: null
     });
   }
   return stateByTab.get(tabId);
 }
 
-function parseBodyMaybe(bodyText) {
-  if (typeof bodyText !== 'string' || !bodyText.trim()) return null;
-  try {
-    return JSON.parse(bodyText);
-  } catch {
-    return null;
-  }
-}
-
-function asEndpoint(event) {
-  const parsed = parseBodyMaybe(event.responseBody);
+function toObservationEnvelope(event) {
   return {
-    method: event.method || 'GET',
-    url: normalizeEndpoint(event.url),
-    status: event.status ?? null,
-    contentType: event.contentType || null,
-    schema: parsed ? inferSchema(parsed) : null
+    kind: 'network.response',
+    timestamp: Date.now(),
+    source: 'browser',
+    transport: event?.transport || 'unknown',
+    method: event?.method || 'GET',
+    url: event?.url || '',
+    status: event?.status ?? null,
+    headers: {
+      'content-type': event?.contentType || ''
+    },
+    body: typeof event?.responseBody === 'string' ? event.responseBody : ''
   };
 }
 
 function aggregate(tabId) {
   const state = getTabState(tabId);
-  const endpointsMap = new Map();
-  for (const event of state.network) {
-    const endpoint = asEndpoint(event);
-    const key = `${endpoint.method}:${endpoint.url}`;
-    if (!endpointsMap.has(key)) {
-      endpointsMap.set(key, endpoint);
-    }
-  }
 
-  const endpoints = [...endpointsMap.values()];
-  const allUrls = state.network.map((item) => item.url).filter(Boolean);
-  const integrations = detectThirdPartyIntegrations(allUrls);
-  const flags = state.snapshot?.featureFlags ?? [];
-
-  const report = {
+  return analyzeWithCore({
     tabId,
     discoveredAt: new Date().toISOString(),
-    endpoints,
-    hiddenDataContracts: endpoints.filter((endpoint) => endpoint.schema),
-    featureFlags: flags,
-    invisibleContent: state.snapshot?.invisibleContent ?? {
-      hiddenElements: [],
-      hiddenInputs: [],
-      metadata: {},
-      accessibilityOnly: []
-    },
-    behavioralScripts: state.snapshot?.behavioralScripts ?? [],
-    integrations
-  };
-
-  const artifact = buildDeterministicArtifact(report);
-
-  return {
-    ...report,
-    deterministicArtifact: artifact,
-    connectors: generateConnectors(report),
-    localReplay: {
-      featureFlags: flags.map((flag) => ({
-        key: flag.key,
-        command: `localStorage.setItem('${flag.key}', JSON.stringify(${JSON.stringify(flag.value)}));`
-      }))
-    }
-  };
+    observations: state.observations,
+    snapshot: state.snapshot ?? {}
+  });
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -90,7 +44,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const tabId = sender.tab?.id;
     if (tabId === undefined) return;
     const tabState = getTabState(tabId);
-    tabState.network.push(message.event);
+    tabState.observations.push(toObservationEnvelope(message.event));
     sendResponse({ ok: true });
     return true;
   }
