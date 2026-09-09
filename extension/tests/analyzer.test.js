@@ -36,6 +36,14 @@ test('the service worker persists tab observations across worker restarts', asyn
   assert.match(source, /MAX_CAPTURE_BYTES/);
 });
 
+test('the content bridge handles invalidated extension contexts without unhandled messages', async () => {
+  const source = await readFile(new URL('../src/content.js', import.meta.url), 'utf8');
+
+  assert.match(source, /function extensionContextAvailable/);
+  assert.match(source, /function sendRuntimeMessage/);
+  assert.match(source, /chrome\.runtime\.lastError/);
+});
+
 test('followPagination replays continuations until the reconstructed dataset is complete', async () => {
   const reports = [
     { structuredExtraction: { datasets: [{ id: 'jobs', pagination: { nextRequest: { method: 'GET', url: 'https://example.test/jobs?cursor=b' } } }] } },

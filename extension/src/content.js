@@ -1,19 +1,54 @@
+function extensionContextAvailable() {
+  try {
+    return Boolean(chrome.runtime?.id);
+  } catch {
+    return false;
+  }
+}
+
+function sendRuntimeMessage(message, callback) {
+  if (!extensionContextAvailable()) {
+    callback?.(null, new Error('Extension context is no longer available. Reload this tab.'));
+    return;
+  }
+  try {
+    const pending = chrome.runtime.sendMessage(message, (response) => {
+      let runtimeError;
+      try {
+        runtimeError = chrome.runtime.lastError;
+      } catch (error) {
+        callback?.(null, error);
+        return;
+      }
+      callback?.(response, runtimeError ? new Error(runtimeError.message) : null);
+    });
+    pending?.catch?.(() => {});
+  } catch (error) {
+    callback?.(null, error);
+  }
+}
+
 (function installProbe() {
-  const src = chrome.runtime.getURL('src/injected/networkProbe.js');
-  const script = document.createElement('script');
-  script.src = src;
-  script.async = false;
-  (document.documentElement || document.head).appendChild(script);
-  script.remove();
+  if (!extensionContextAvailable()) return;
+  try {
+    const src = chrome.runtime.getURL('src/injected/networkProbe.js');
+    const script = document.createElement('script');
+    script.src = src;
+    script.async = false;
+    const parent = document.documentElement || document.head;
+    if (!parent) return;
+    parent.appendChild(script);
+    script.remove();
+  } catch {}
 })();
 
-chrome.runtime.sendMessage({ kind: 'page_started', url: window.location.href });
+sendRuntimeMessage({ kind: 'page_started', url: window.location.href });
 
 window.addEventListener('message', (event) => {
   if (event.source !== window) return;
   if (event.data?.source !== 'website-xray') return;
 
-  chrome.runtime.sendMessage({
+  sendRuntimeMessage({
     kind: 'network_event',
     event: event.data.payload
   });
@@ -94,8 +129,8 @@ function collectSnapshot() {
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.kind === 'collect_snapshot') {
     const snapshot = collectSnapshot();
-    chrome.runtime.sendMessage({ kind: 'dom_snapshot', snapshot }, () => {
-      sendResponse({ ok: true });
+    sendRuntimeMessage({ kind: 'dom_snapshot', snapshot }, (_response, runtimeError) => {
+      sendResponse(runtimeError ? { ok: false, error: runtimeError.message } : { ok: true });
     });
     return true;
   }

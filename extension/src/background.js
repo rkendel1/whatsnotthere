@@ -183,10 +183,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
 
-    chrome.tabs.sendMessage(tabId, { kind: 'collect_snapshot' }, () => {
-      const response = chrome.runtime.lastError;
-      if (response) {
-        sendResponse({ ok: false, error: response.message });
+    chrome.tabs.sendMessage(tabId, { kind: 'collect_snapshot' }, (contentResponse) => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError) {
+        sendResponse({ ok: false, error: runtimeError.message });
+        return;
+      }
+      if (!contentResponse?.ok) {
+        sendResponse({ ok: false, error: contentResponse?.error || 'The page snapshot could not be collected. Reload this tab.' });
         return;
       }
 
